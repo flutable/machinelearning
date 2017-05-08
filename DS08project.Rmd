@@ -1,0 +1,185 @@
+---
+title: "DS08 machine learning project"
+author: "NickM"
+date: "7 May 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#library(knitr)
+library(leaflet)
+library(jsonlite)
+```
+
+## Predicting correct form in exercises
+
+Using a collection of accelerometers, it is possible to record human movements during performance of various exercises.
+The given dataset contains variables obtained from 5 different performances of a bicep curl. 
+The outcome variable, _classe_, represents common performances of the exercise:
+
+* "A"	exactly according to the specification
+* "B"	throwing the elbows to the front
+* "C"	lifting the dumbbell only halfway
+* "D"	lowering the dumbbell only halfway
+* "E"	throwing the hips to the front
+
+The aim of this project is to predict the performance quality of exercises characterised in the test data set.
+
+## Setup and data ingestion
+
+The packages caret, data.table, corrplot (for nice correlation plots), psych (for one run of principal component analysis) and doParallel (to speed things up!) were used.
+
+```{r,echo=FALSE}
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(corrplot))
+suppressPackageStartupMessages(library(parallel))
+suppressPackageStartupMessages(library(doParallel))
+suppressPackageStartupMessages(library(psych))
+suppressPackageStartupMessages(library(randomForest))
+```
+
+The test and training sets were mirrored on local disk and ingested as follows. A cluster was configured to enable parallel processing.
+```{r,echo=TRUE}
+pcluster <- makeCluster(detectCores() - 1) #leave 1 core for OS
+registerDoParallel(pcluster)
+
+training <- read.table("pml-training.csv", header = TRUE, sep=",", stringsAsFactors=FALSE )
+testing  <- read.table("pml-testing.csv",  header = TRUE, sep=",", stringsAsFactors=FALSE )
+```
+
+## Data pre-processing
+
+The training and testing datasets contained 160 variables, and 19216 and 20 observations, respectively.
+The training dataset contained periodic summary observations ([1], section 5.1) comprising features derived from previous observations. These summaries were removed.
+```{r RemoveSummaries}
+# Data cleanup
+# 1. remove window summary data
+training <- training[training$new_window == "no", ]
+testing  <-  testing[testing$new_window == "no", ]
+```
+
+The training dataset contained many columns containing no data, as these columns were calculated as part of the windowed feature summaries. These columns, along with window boundaries, were removed. The training dataset also contained columns specific to each test subject (i.e. observation ID, the subject performing the exercise, and associated timestamps). These columns were also removed.
+
+```{r RemoveTrainingsetColumns}
+# 2. remove ID column and columns containing mostly NA, and user/timestamp columns
+#    manually copied column names from csv opened in Excel
+trainingc <- training[ , !colnames(training) %in% c("X","user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window", "kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", "skewness_roll_belt", "skewness_roll_belt.1", "skewness_yaw_belt", "max_roll_belt", "max_picth_belt", "max_yaw_belt", "min_roll_belt", "min_pitch_belt", "min_yaw_belt", "amplitude_roll_belt", "amplitude_pitch_belt", "amplitude_yaw_belt", "var_total_accel_belt", "avg_roll_belt", "stddev_roll_belt", "var_roll_belt", "avg_pitch_belt", "stddev_pitch_belt", "var_pitch_belt", "avg_yaw_belt", "stddev_yaw_belt", "var_yaw_belt", "var_accel_arm", "avg_roll_arm", "stddev_roll_arm", "var_roll_arm", "avg_pitch_arm", "stddev_pitch_arm", "var_pitch_arm", "avg_yaw_arm", "stddev_yaw_arm", "var_yaw_arm", "kurtosis_roll_arm", "kurtosis_picth_arm", "kurtosis_yaw_arm", "skewness_roll_arm", "skewness_pitch_arm", "skewness_yaw_arm", "max_roll_arm", "max_picth_arm", "max_yaw_arm", "min_roll_arm", "min_pitch_arm", "min_yaw_arm", "amplitude_roll_arm", "amplitude_pitch_arm", "amplitude_yaw_arm", "kurtosis_roll_dumbbell", "kurtosis_picth_dumbbell", "kurtosis_yaw_dumbbell", "skewness_roll_dumbbell", "skewness_pitch_dumbbell", "skewness_yaw_dumbbell", "max_roll_dumbbell", "max_picth_dumbbell", "max_yaw_dumbbell", "min_roll_dumbbell", "min_pitch_dumbbell", "min_yaw_dumbbell", "amplitude_roll_dumbbell", "amplitude_pitch_dumbbell", "amplitude_yaw_dumbbell", "total_accel_dumbbell", "var_accel_dumbbell", "avg_roll_dumbbell", "stddev_roll_dumbbell", "var_roll_dumbbell", "avg_pitch_dumbbell", "stddev_pitch_dumbbell", "var_pitch_dumbbell", "avg_yaw_dumbbell", "stddev_yaw_dumbbell", "var_yaw_dumbbell", "kurtosis_roll_forearm", "kurtosis_picth_forearm", "kurtosis_yaw_forearm", "skewness_roll_forearm", "skewness_pitch_forearm", "skewness_yaw_forearm", "max_roll_forearm", "max_picth_forearm", "max_yaw_forearm", "min_roll_forearm", "min_pitch_forearm", "min_yaw_forearm", "amplitude_roll_forearm", "amplitude_pitch_forearm", "amplitude_yaw_forearm", "total_accel_forearm", "var_accel_forearm", "avg_roll_forearm", "stddev_roll_forearm", "var_roll_forearm", "avg_pitch_forearm", "stddev_pitch_forearm", "var_pitch_forearm", "avg_yaw_forearm", "stddev_yaw_forearm", "var_yaw_forearm")]
+```
+Also create a training set without the outcome variable
+```{r noOutput}
+trainingNC <- trainingc[, !colnames(trainingc) %in% c("classe") ]
+```
+
+To enable classification via a random forest approach, the training set output variable was changed to be a factor variable.
+
+```{r OuputFactor}
+trainingc$classe <- as.factor(trainingc$classe)
+```
+
+The testing set had an additional column, "problem_id", corresponding to the question number in the 20 question quiz. This column, along with the columns mentioned for the training set, was removed. THe code is similar to that for the training set, and is shown in the Rmd file, but not in HTML.
+```{r RemoveTestsetColums, echo=FALSE}
+# 4. Clean test set as well, removing additional "problem_id" field
+testingc  <-  testing[ , !colnames(testing) %in% c("X", "problem_id", "user_name", "raw_timestamp_part_1", "raw_timestamp_part_2", "cvtd_timestamp", "new_window", "num_window", "kurtosis_roll_belt", "kurtosis_picth_belt", "kurtosis_yaw_belt", "skewness_roll_belt", "skewness_roll_belt.1", "skewness_yaw_belt", "max_roll_belt", "max_picth_belt", "max_yaw_belt", "min_roll_belt", "min_pitch_belt", "min_yaw_belt", "amplitude_roll_belt", "amplitude_pitch_belt", "amplitude_yaw_belt", "var_total_accel_belt", "avg_roll_belt", "stddev_roll_belt", "var_roll_belt", "avg_pitch_belt", "stddev_pitch_belt", "var_pitch_belt", "avg_yaw_belt", "stddev_yaw_belt", "var_yaw_belt", "var_accel_arm", "avg_roll_arm", "stddev_roll_arm", "var_roll_arm", "avg_pitch_arm", "stddev_pitch_arm", "var_pitch_arm", "avg_yaw_arm", "stddev_yaw_arm", "var_yaw_arm", "kurtosis_roll_arm", "kurtosis_picth_arm", "kurtosis_yaw_arm", "skewness_roll_arm", "skewness_pitch_arm", "skewness_yaw_arm", "max_roll_arm", "max_picth_arm", "max_yaw_arm", "min_roll_arm", "min_pitch_arm", "min_yaw_arm", "amplitude_roll_arm", "amplitude_pitch_arm", "amplitude_yaw_arm", "kurtosis_roll_dumbbell", "kurtosis_picth_dumbbell", "kurtosis_yaw_dumbbell", "skewness_roll_dumbbell", "skewness_pitch_dumbbell", "skewness_yaw_dumbbell", "max_roll_dumbbell", "max_picth_dumbbell", "max_yaw_dumbbell", "min_roll_dumbbell", "min_pitch_dumbbell", "min_yaw_dumbbell", "amplitude_roll_dumbbell", "amplitude_pitch_dumbbell", "amplitude_yaw_dumbbell", "total_accel_dumbbell", "var_accel_dumbbell", "avg_roll_dumbbell", "stddev_roll_dumbbell", "var_roll_dumbbell", "avg_pitch_dumbbell", "stddev_pitch_dumbbell", "var_pitch_dumbbell", "avg_yaw_dumbbell", "stddev_yaw_dumbbell", "var_yaw_dumbbell", "kurtosis_roll_forearm", "kurtosis_picth_forearm", "kurtosis_yaw_forearm", "skewness_roll_forearm", "skewness_pitch_forearm", "skewness_yaw_forearm", "max_roll_forearm", "max_picth_forearm", "max_yaw_forearm", "min_roll_forearm", "min_pitch_forearm", "min_yaw_forearm", "amplitude_roll_forearm", "amplitude_pitch_forearm", "amplitude_yaw_forearm", "total_accel_forearm", "var_accel_forearm", "avg_roll_forearm", "stddev_roll_forearm", "var_roll_forearm", "avg_pitch_forearm", "stddev_pitch_forearm", "var_pitch_forearm", "avg_yaw_forearm", "stddev_yaw_forearm", "var_yaw_forearm")]
+
+```
+
+## Overview of remaining variable correlations
+
+Using the _psych_ package, calculate the correlations between the remaining variables in training set, with the outcome variable omitted (as it is a factor). 
+The graph shows positive (upward-sloping ellipses, blue shades) and negative correlations (downward-sloping ellipses, red/brown shades) between each pair of training variables. Also, the "flatter" the ellipse, the stronger the correlation.
+
+Many of the "gyroscope" predictors appear to have little correlation, and could probably be eliminated.
+
+```{r ShowCorrelations}
+# get correlations between remaining variables
+trainingcCor <- cor(trainingc[ , !colnames(trainingc) %in% c("classe")])
+# show correlations
+corrplot(trainingcCor, method="ellipse", tl.cex = 0.6, tl.srt = 60 )
+```
+
+
+## Model choice
+Model 1 is naive, and uses all predictors after eliminating administrative and "NA" columns. The model run times are recorded for benchmarking.
+
+```{r Mod1,cache=TRUE}
+    mod1 <- train( classe ~ ., method="rf", data=trainingc) 
+```
+
+## Model 1 predictions using all remaining predictors
+
+Use model 1 to predict using testing set.
+```{r Prediction1}
+pred1 <- predict(mod1, newdata=testingc)
+pred1
+```
+According to the 20 question quiz, each prediction correctly predicts the exercise performance error.
+
+## Model 2 using principal components
+
+Examine the model using only principal components.
+
+Use psych::principal to show the eigenvectors (predictor weights) for each predictor in the cleaned training set.
+```{r plottrainingeigen}
+mod2PCAs <- principal(trainingc[ , !colnames(trainingc) %in% c("classe")])  
+#plot the eigenvalues (amount of variation explained by each component)
+plot(mod2PCAs$values, type="b", ylab="Eigenvalues", xlab="Component")
+```
+
+We can probably get away with 10 components. Initially, use as many components as necessary. 
+
+Partition the cleaned training set into a sub-training and sub-testing set.
+```{r}
+# Partition cleaned training data
+inTrain <- createDataPartition(y=trainingc$classe, p=0.75, list=FALSE)
+trainingPCA <- trainingc[inTrain,]  #14412 obs
+testingPCA  <- trainingc[-inTrain,] # 4804 obs
+    
+#create datasets without the outcome variable
+trainingPCA.NC <- trainingPCA[ , !(colnames(trainingPCA) %in% "classe")]
+testingPCA.NC  <- testingPCA[ , !(colnames(testingPCA)  %in% "classe")]
+```
+
+Find the principal components. 
+ ```{r}
+mod2Preproc <- preProcess(trainingPCA.NC, method="pca")
+```
+
+The variable pcaComp (if passed to preProcess()) specifies the number of components to use, though to retain 95% of the variance, this analysis has found `r mod2Preproc$numComp` components to use.
+
+Create training and testing sets using only principal components
+```{r}    
+trainPC2 <- predict(mod2Preproc, trainingPCA.NC)  
+predPC2  <- predict(mod2Preproc, testingPCA.NC )  
+```
+
+Train model 2 using just the principal components, and the new training set with the outcome variable. 
+```{r model2,cache=TRUE}    
+mod2    <-train(x=trainPC2, y=trainingPCA$classe, method="rf")
+```    
+  
+Finally predict model outcomes using the model and the test principal components
+```{r}
+pred2   <- predict(mod2, predPC2)
+cm2 <- confusionMatrix(testingPCA$classe, pred2)
+cm2
+```
+The confusion matrix shows an accuracy of `r cm2$overall[[1]][1]` and hence out of band error as `r 1-cm2$overall[[1]][1]`.
+
+## R environment
+The R environment was configured as follows:
+```{r sessioninfo}
+sessionInfo()
+```
+```{r cleanup,echo=FALSE}
+#clean up
+stopCluster(pcluster)
+registerDoSEQ()
+```
+
+## References
+[1] Velloso, E., Bulling, A., Gellersen, H., et al, _Qualitative Activity Recognition of Weight Lifting Exercises_, in Procedings of 4th International Conference in Coooperation with SIGCHI (Augmented Human ' 13), Stuttgard, Germany, ACM SIGCHI, 2013, 
+
+[2] Lesmeister, C., _Mastering Machine Learning with R_, 2nd edition, Packt Publishing, 2017 (An excellent book, and explains many of the concepts glossed over in the course)
+
